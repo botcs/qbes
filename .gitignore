@@ -1,0 +1,6 @@
+imagenet-exp/data
+imagenet-exp/logs
+
+slurm*.out
+*.pyc
+*.json
