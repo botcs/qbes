@@ -48,7 +48,6 @@ Section('resolution', 'resolution scheduling').params(
 )
 
 Section('data', 'data related stuff').params(
-    train_dataset=Param(str, '.dat file to use for training', required=True),
     val_dataset=Param(str, '.dat file to use for validation', required=True),
     num_workers=Param(int, 'The number of workers', required=True),
     in_memory=Param(int, 'does the dataset fit in memory? (1/0)', required=True)
@@ -249,7 +248,7 @@ class ImageNetTrainer:
 
         subset_indices = None
         if proportion < 1:
-            imagenet_validation_set_size = 50000
+            imagenet_validation_set_size = 1281167
             subset_size = int(imagenet_validation_set_size * proportion)
             np.random.default_rng(seed)
             np.random.seed(seed)
@@ -337,12 +336,14 @@ class ImageNetTrainer:
         model.eval()
         all_configs = json.load(open(config_file))
         configs = all_configs[id_from:id_to]
-        stats_dir = f"{folder}/stats/{os.path.basename(config_file)[:-5]}"
-        os.makedirs(stats_dir, exist_ok=True)
+        cache_dir = f"{folder}/cache/train/{os.path.basename(config_file)[:-5]}"
+        self.log({"cache dir": cache_dir})
+        os.makedirs(cache_dir, exist_ok=True)
 
         with ch.no_grad(): 
             with autocast():
                 for config_id, skip_block_ids in enumerate(configs, start=id_from):
+                    start_time = time.time()
                     for images, target in tqdm(self.val_loader):
                         output = self.model(images, skip_block_ids)
                         if lr_tta:
@@ -357,12 +358,14 @@ class ImageNetTrainer:
                         loss_val = self.loss(output, target)
                         self.val_meters['loss'](loss_val)
 
-
-                    fname = f"{stats_dir}/{config_id:05}.pth"
+                    end_time = time.time()
+                    fname = f"{cache_dir}/{config_id:05}.pth"
                     save_dict = {
                         "preds": self.qbes_outputs["preds"].compute().cpu(),
                         "targets": self.qbes_outputs["targets"].compute().cpu(),
+                        "inference_time": end_time - start_time
                     }
+
                     ch.save(save_dict, fname)
                     
 
