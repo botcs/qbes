@@ -21,7 +21,7 @@ training:
   eval_only: 1
   batch_size: 512
   bn_wd: 0
-  distributed: 0
+  distributed: 1
   epochs: 88
   label_smoothing: 0.1
   momentum: 0.9
@@ -31,3 +31,5 @@ training:
 validation:
   lr_tta: true
   resolution: 256
+  proportion: 1.0
+  batch_size: 256

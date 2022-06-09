@@ -4,3 +4,6 @@ imagenet-exp/logs
 slurm*.out
 *.pyc
 *.json
+*.out
+*.err
+*.pth

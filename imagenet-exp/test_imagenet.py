@@ -247,18 +247,21 @@ class ImageNetTrainer:
             non_blocking=True)
         ]
 
-        imagenet_validation_set_size = 50000
-        subset_size = int(imagenet_validation_set_size * proportion)
-        np.random.default_rng(seed)
-        np.random.seed(seed)
-        subset_indices = np.random.choice(
-            imagenet_validation_set_size, 
-            subset_size, 
-            replace=False)
+        subset_indices = None
+        if proportion < 1:
+            imagenet_validation_set_size = 50000
+            subset_size = int(imagenet_validation_set_size * proportion)
+            np.random.default_rng(seed)
+            np.random.seed(seed)
+            subset_indices = np.random.choice(
+                imagenet_validation_set_size, 
+                subset_size, 
+                replace=False)
+            
         loader = Loader(val_dataset,
                         batch_size=batch_size,
                         num_workers=num_workers,
-                        order=OrderOption.SEQUENTIAL,
+                        order=OrderOption.RANDOM,
                         drop_last=False,
                         pipelines={
                             'image': image_pipeline,
@@ -266,7 +269,9 @@ class ImageNetTrainer:
                         },
                         distributed=distributed,
                         indices=subset_indices,
-                        seed=seed)
+                        seed=seed,
+                        os_cache=True
+                        )
         return loader
 
     def eval_and_log(self, extra_dict={}):
@@ -332,16 +337,12 @@ class ImageNetTrainer:
         model.eval()
         all_configs = json.load(open(config_file))
         configs = all_configs[id_from:id_to]
-        os.makedirs(f"{folder}/{os.path.basename(config_file)[:-5]}", exist_ok=True)
+        stats_dir = f"{folder}/stats/{os.path.basename(config_file)[:-5]}"
+        os.makedirs(stats_dir, exist_ok=True)
 
         with ch.no_grad(): 
             with autocast():
-                for config_id, skip_block_ids in enumerate(configs):
-                    save_val_top_k = []
-                    save_ind_top_k = []
-                    save_targets = []
-                    # Reset val loader so that the same samples are evaluated
-                    # self.val_loader = self.create_val_loader()
+                for config_id, skip_block_ids in enumerate(configs, start=id_from):
                     for images, target in tqdm(self.val_loader):
                         output = self.model(images, skip_block_ids)
                         if lr_tta:
@@ -350,28 +351,24 @@ class ImageNetTrainer:
                         for k in ['top_1', 'top_5']:
                             self.val_meters[k](output, target)
 
-                        val_top_k, ind_top_k = output.softmax(dim=1).topk(top_k_pred)
-                        save_val_top_k.append(val_top_k)
-                        save_ind_top_k.append(ind_top_k)
-                        save_targets.append(target)
+                        self.qbes_outputs["preds"](output.argmax(dim=1))
+                        self.qbes_outputs["targets"](target)
 
                         loss_val = self.loss(output, target)
                         self.val_meters['loss'](loss_val)
 
-                    save_val_top_k = ch.cat(save_val_top_k)
-                    save_ind_top_k = ch.cat(save_ind_top_k)
-                    save_targets = ch.cat(save_targets)
-                    fname = f"{folder}/{os.path.basename(config_file)[:-5]}/{config_id}.pth"
+
+                    fname = f"{stats_dir}/{config_id:05}.pth"
                     save_dict = {
-                        "values": save_val_top_k.cpu(), 
-                        "indices": save_ind_top_k.cpu(),
-                        "targets": save_targets.cpu()
+                        "preds": self.qbes_outputs["preds"].compute().cpu(),
+                        "targets": self.qbes_outputs["targets"].compute().cpu(),
                     }
                     ch.save(save_dict, fname)
                     
 
                     stats = {k: m.compute().item() for k, m in self.val_meters.items()}
                     [meter.reset() for meter in self.val_meters.values()]
+                    [meter.reset() for meter in self.qbes_outputs.values()]
                     self.log({"config_id": config_id, "eval_stats": stats})
         return stats
 
@@ -380,7 +377,11 @@ class ImageNetTrainer:
         self.val_meters = {
             'top_1': torchmetrics.Accuracy(compute_on_step=False).to(self.gpu),
             'top_5': torchmetrics.Accuracy(compute_on_step=False, top_k=5).to(self.gpu),
-            'loss': MeanScalarMetric(compute_on_step=False).to(self.gpu)
+            'loss': MeanScalarMetric(compute_on_step=False).to(self.gpu),
+        }
+        self.qbes_outputs = {
+            "preds": torchmetrics.CatMetric().to(self.gpu),
+            "targets": torchmetrics.CatMetric().to(self.gpu),
         }
 
         if self.gpu == 0:
@@ -399,8 +400,8 @@ class ImageNetTrainer:
                 json.dump(params, handle)
 
     def log(self, content):
-        print(f'=> Log: {content}')
         if self.gpu != 0: return
+        print(f'=> Log: {content}')
         cur_time = time.time()
         with open(self.log_folder / 'log', 'a+') as fd:
             fd.write(json.dumps({
