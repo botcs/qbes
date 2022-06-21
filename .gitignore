@@ -7,3 +7,4 @@ slurm*.out
 *.out
 *.err
 *.pth
+*-checkpoint.ipynb

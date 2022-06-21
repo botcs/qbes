@@ -223,8 +223,9 @@ class ImageNetTrainer:
     @param('validation.seed')
     @param('validation.proportion')
     @param('training.distributed')
+    @param('data.in_memory')
     def create_val_loader(self, val_dataset, num_workers, batch_size,
-                          resolution, seed, proportion, distributed):
+                          resolution, seed, proportion, distributed, in_memory):
         this_device = f'cuda:{self.gpu}'
         val_path = Path(val_dataset)
         assert val_path.is_file()
@@ -269,7 +270,7 @@ class ImageNetTrainer:
                         distributed=distributed,
                         indices=subset_indices,
                         seed=seed,
-                        os_cache=True
+                        os_cache=in_memory
                         )
         return loader
 
@@ -336,7 +337,7 @@ class ImageNetTrainer:
         model.eval()
         all_configs = json.load(open(config_file))
         configs = all_configs[id_from:id_to]
-        cache_dir = f"{folder}/cache/train/{os.path.basename(config_file)[:-5]}"
+        cache_dir = f"{folder}/{os.path.basename(config_file)[:-5]}"
         self.log({"cache dir": cache_dir})
         os.makedirs(cache_dir, exist_ok=True)
 
