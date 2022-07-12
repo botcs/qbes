@@ -9,6 +9,5 @@ do
     k=${K[$i]}
     n=${num_tasks[$i]}
     num_chunks=$((n / chunk_size))
-    echo sbatch --array=0-$num_chunks --job-name="K$k-train" eval-cluster/training-set-0.1/chooseK.sh $k 
-    # sbatch --array=0-$num_chunks eval-cluster/training-set-0.1/chooseK.sh $k
+    echo sbatch --array=0-$num_chunks --job-name=\"K$k-train\" eval-cluster/training-set-0.1/chooseK.sh $k $chunk_size
 done

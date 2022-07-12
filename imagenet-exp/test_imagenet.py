@@ -249,15 +249,32 @@ class ImageNetTrainer:
 
         subset_indices = None
         if proportion < 1:
-            imagenet_validation_set_size = 1281167
-            subset_size = int(imagenet_validation_set_size * proportion)
+            dummy_loader = Loader(val_dataset,
+                batch_size=1,
+                num_workers=num_workers,
+                order=OrderOption.RANDOM,
+                drop_last=False,
+                pipelines={
+                    'image': image_pipeline,
+                    'label': label_pipeline
+                },
+                distributed=distributed,
+                indices=subset_indices,
+                seed=seed,
+                os_cache=in_memory
+                )
+    
+            dataset_size = len(dummy_loader)
+            print(f"Original dataset size: {dataset_size}")
+            subset_size = int(dataset_size * proportion)
             np.random.default_rng(seed)
             np.random.seed(seed)
             subset_indices = np.random.choice(
-                imagenet_validation_set_size, 
+                dataset_size, 
                 subset_size, 
                 replace=False)
-            
+            print(f"Subset size: {subset_size}")
+
         loader = Loader(val_dataset,
                         batch_size=batch_size,
                         num_workers=num_workers,
@@ -340,7 +357,7 @@ class ImageNetTrainer:
         cache_dir = f"{folder}/{os.path.basename(config_file)[:-5]}"
         self.log({"cache dir": cache_dir})
         os.makedirs(cache_dir, exist_ok=True)
-
+        stats = {}
         with ch.no_grad(): 
             with autocast():
                 for config_id, skip_block_ids in enumerate(configs, start=id_from):
@@ -348,7 +365,7 @@ class ImageNetTrainer:
                     for images, target in tqdm(self.val_loader):
                         output = self.model(images, skip_block_ids)
                         if lr_tta:
-                            output += self.model(ch.flip(images, dims=[3]))
+                            output += self.model(ch.flip(images, dims=[3]), skip_block_ids)
 
                         for k in ['top_1', 'top_5']:
                             self.val_meters[k](output, target)
@@ -370,10 +387,11 @@ class ImageNetTrainer:
                     ch.save(save_dict, fname)
                     
 
-                    stats = {k: m.compute().item() for k, m in self.val_meters.items()}
+                    stats_entry = {k: m.compute().item() for k, m in self.val_meters.items()}
                     [meter.reset() for meter in self.val_meters.values()]
                     [meter.reset() for meter in self.qbes_outputs.values()]
-                    self.log({"config_id": config_id, "eval_stats": stats})
+                    self.log({"config_id": config_id, "eval_stats": stats_entry})
+                    stats[config_id] = stats_entry
         return stats
 
     @param('logging.folder')
