@@ -331,7 +331,15 @@ class ImageNetTrainer:
     @param('training.use_blurpool')
     def create_model_and_scaler(self, arch, pretrained, distributed, use_blurpool):
         scaler = GradScaler()
-        model = getattr(models, arch)(pretrained=pretrained)
+        # model = getattr(models, arch)(pretrained=pretrained)
+        if "swin" in arch:
+            import gated_swin
+            model_loader = getattr(gated_swin, arch)
+            weights = getattr(gated_swin, "Swin_B_Weights")
+            model = model_loader(weights=weights.DEFAULT)
+        else:
+            model_loader = getattr(models, arch)
+            model = model_loader(pretrained=pretrained)
         def apply_blurpool(mod: ch.nn.Module):
             for (name, child) in mod.named_children():
                 if isinstance(child, ch.nn.Conv2d) and (np.max(child.stride) > 1 and child.in_channels >= 16): 

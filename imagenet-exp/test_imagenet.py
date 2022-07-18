@@ -9,6 +9,7 @@ ch.autograd.profiler.profile(False)
 
 from torchvision import models
 import gated_resnet
+import gated_swin
 import torchmetrics
 import numpy as np
 from tqdm import tqdm
@@ -315,7 +316,16 @@ class ImageNetTrainer:
         # model = getattr(models, arch)(pretrained=pretrained)
 
         #Override for QBES experiments
-        model = getattr(gated_resnet, arch)()
+        if "resnet" in arch:
+            model = getattr(gated_resnet, arch)()
+        elif "swin" in arch:
+            model = getattr(gated_swin, arch)
+
+            model_loader = getattr(gated_swin, arch)
+            weights = getattr(gated_swin, "Swin_B_Weights")
+            model = model_loader(weights=weights.DEFAULT)
+        else:
+            raise NotImplementedError("lel")
 
         def apply_blurpool(mod: ch.nn.Module):
             for (name, child) in mod.named_children():
@@ -327,7 +337,7 @@ class ImageNetTrainer:
         model = model.to(memory_format=ch.channels_last)
         model = model.to(self.gpu)
 
-        if weights != "":
+        if "swin" not in arch and weights != "":
             state_dict = ch.load(weights)
             # if trained with distributed=True then each
             # weight entry will have "module." beginninng
