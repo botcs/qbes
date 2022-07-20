@@ -299,8 +299,6 @@ class ImageNetTrainer:
         if self.gpu == 0:
             self.log(dict({
                 'current_lr': self.optimizer.param_groups[0]['lr'],
-                'top_1': stats['top_1'],
-                'top_5': stats['top_5'],
                 'val_time': val_time
             }, **extra_dict))
 
