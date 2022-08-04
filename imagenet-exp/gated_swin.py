@@ -341,6 +341,7 @@ class SwinTransformer(nn.Module):
         block: Optional[Callable[..., nn.Module]] = None,
     ):
         super().__init__()
+        self.trunk_only = False
         _log_api_usage_once(self)
         self.num_classes = num_classes
 
@@ -363,14 +364,14 @@ class SwinTransformer(nn.Module):
         )
 
         total_stage_blocks = sum(depths)
-        stage_block_id = 0
+        self.stage_block_id = 0
         # build SwinTransformer blocks
         for i_stage in range(len(depths)):
             stage: List[nn.Module] = []
             dim = embed_dim * 2 ** i_stage
             for i_layer in range(depths[i_stage]):
                 # adjust stochastic depth probability based on the depth of the stage block
-                sd_prob = stochastic_depth_prob * float(stage_block_id) / (total_stage_blocks - 1)
+                sd_prob = stochastic_depth_prob * float(self.stage_block_id) / (total_stage_blocks - 1)
                 stage.append(
                     block(
                         dim,
@@ -382,10 +383,10 @@ class SwinTransformer(nn.Module):
                         attention_dropout=attention_dropout,
                         stochastic_depth_prob=sd_prob,
                         norm_layer=norm_layer,
-                        block_id=stage_block_id,
+                        block_id=self.stage_block_id,
                     )
                 )
-                stage_block_id += 1
+                self.stage_block_id += 1
             layers.append(nn.Sequential(*stage))
             # add patch merging layer
             if i_stage < (len(depths) - 1):
@@ -403,7 +404,26 @@ class SwinTransformer(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x, skip_block=[]):
+
+    def infer_trunk_only(self):
+        self.trunk_only = True
+
+    def forward(self, x, *args, **kwargs):
+        if self.trunk_only:
+            return self._forward_trunk(x)
+        else:
+            return self._forward(x, *args, **kwargs)
+    
+    def _forward_trunk(self, x):
+        # Forward until the first block
+        # This is purely based on experimental data, no theory
+        with torch.no_grad():
+            x = self.features[1][0](self.features[0](x))
+
+        return x
+
+
+    def _forward(self, x, skip_block=[]):
         # x = self.features(x)
         for stage in self.features:
             if isinstance(stage, nn.Sequential):
