@@ -9,6 +9,7 @@ slurm*.out
 *.pth
 *-checkpoint.ipynb
 *.png
+*.pt
 ERR 
 OUT
 SLURM_OUT

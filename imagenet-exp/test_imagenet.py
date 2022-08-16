@@ -253,7 +253,7 @@ class ImageNetTrainer:
             dummy_loader = Loader(val_dataset,
                 batch_size=1,
                 num_workers=num_workers,
-                order=OrderOption.RANDOM,
+                order=OrderOption.SEQUENTIAL,
                 drop_last=False,
                 pipelines={
                     'image': image_pipeline,
@@ -279,7 +279,7 @@ class ImageNetTrainer:
         loader = Loader(val_dataset,
                         batch_size=batch_size,
                         num_workers=num_workers,
-                        order=OrderOption.RANDOM,
+                        order=OrderOption.SEQUENTIAL,
                         drop_last=False,
                         pipelines={
                             'image': image_pipeline,

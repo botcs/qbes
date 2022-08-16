@@ -404,9 +404,11 @@ class SwinTransformer(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-
-    def infer_trunk_only(self):
+    def infer_trunk_only(self, trunk_layer):
+        assert trunk_layer in ["first", "last"]
         self.trunk_only = True
+        self.trunk_layer = trunk_layer
+        self.trunk_dim = 128 if trunk_layer == "first" else 1024
 
     def forward(self, x, *args, **kwargs):
         if self.trunk_only:
@@ -415,11 +417,13 @@ class SwinTransformer(nn.Module):
             return self._forward(x, *args, **kwargs)
     
     def _forward_trunk(self, x):
-        # Forward until the first block
-        # This is purely based on experimental data, no theory
         with torch.no_grad():
-            x = self.features[1][0](self.features[0](x))
-
+            if self.trunk_layer == "first":
+                # Forward until the first block
+                # This is purely based on experimental data, no theory
+                x = self.features[1][0](self.features[0](x))
+            else:
+                x = self.features(x)
         return x
 
 

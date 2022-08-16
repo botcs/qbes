@@ -50,7 +50,10 @@ Section('data', 'data related stuff').params(
     train_dataset=Param(str, '.dat file to use for training', required=True),
     val_dataset=Param(str, '.dat file to use for validation', required=True),
     num_workers=Param(int, 'The number of workers', required=True),
-    in_memory=Param(int, 'does the dataset fit in memory? (1/0)', required=True)
+    in_memory=Param(int, 'does the dataset fit in memory? (1/0)', required=True),
+    train_proportion=Param(float, 'how much of the validation data to process', default=1.),
+    val_proportion=Param(float, 'how much of the validation data to process', default=1.),
+    seed=Param(int, "random seed for batch ordering", default=42)
 )
 
 Section('lr', 'lr scheduling').params(
@@ -69,13 +72,13 @@ Section('logging', 'how to log stuff').params(
 Section('validation', 'Validation parameters stuff').params(
     batch_size=Param(int, 'The batch size for validation', default=512),
     resolution=Param(int, 'final resized validation image size', default=224),
-    lr_tta=Param(int, 'should do lr flipping/avging at test time', default=1)
+    lr_tta=Param(int, 'should do lr flipping/avging at test time', default=1),
 )
 
 Section('training', 'training hyper param stuff').params(
     eval_only=Param(int, 'eval only?', default=0),
     batch_size=Param(int, 'The batch size', default=512),
-    optimizer=Param(And(str, OneOf(['sgd'])), 'The optimizer', default='sgd'),
+    optimizer=Param(And(str, OneOf(['sgd', "adam"])), 'The optimizer', default='sgd'),
     momentum=Param(float, 'SGD momentum', default=0.9),
     weight_decay=Param(float, 'weight decay', default=4e-5),
     epochs=Param(int, 'number of epochs', default=30),
@@ -91,7 +94,10 @@ Section('dist', 'distributed training options').params(
 )
 
 Section('mlp', 'K dropping module specific config').params(
-    target_file=Param(str, 'path to target file that gives max K per class')
+    target_file=Param(str, 'path to target file that gives max K per class', required=True),
+    prediction_type=Param(str, "Classify K or regress", required=True),
+    trunk_layer=Param(str, OneOf(["first", "last"]), "Whether to use first or last layer's output as feature", required=True),
+    balance_weight=Param(int, "Whether to reweight samples or not", required=True)
 )
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
@@ -129,6 +135,14 @@ class BlurPoolConv2d(ch.nn.Module):
         blurred = F.conv2d(x, self.blur_filter, stride=1, padding=(1, 1),
                            groups=self.conv.in_channels, bias=None)
         return self.conv.forward(blurred)
+
+
+class LambdaLayer(ch.nn.Module):
+    def __init__(self, lambd):
+        super(LambdaLayer, self).__init__()
+        self.lambd = lambd
+    def forward(self, x):
+        return self.lambd(x)
 
 class ImageNetTrainer:
     @param('training.distributed')
@@ -193,9 +207,12 @@ class ImageNetTrainer:
     @param('training.optimizer')
     @param('training.weight_decay')
     @param('training.label_smoothing')
+    @param("mlp.prediction_type")
+    @param("mlp.target_file")
+    @param("mlp.balance_weight")
     def create_optimizer(self, momentum, optimizer, weight_decay,
-                         label_smoothing):
-        assert optimizer == 'sgd'
+                         label_smoothing, prediction_type, target_file, balance_weight):
+        # assert optimizer == 'sgd'
 
         # Only do weight decay on non-batchnorm parameters
         all_params = list(self.model.named_parameters())
@@ -209,8 +226,25 @@ class ImageNetTrainer:
             'weight_decay': weight_decay
         }]
 
-        self.optimizer = ch.optim.SGD(param_groups, lr=1, momentum=momentum)
-        self.loss = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+        _, counts = ch.load(target_file).unique(return_counts=True)
+        if balance_weight:
+            weight = 1 / counts.float()
+        else:
+            weight = ch.ones_like(counts.float())
+        this_device = f'cuda:{self.gpu}'
+        weight = weight.to(device=this_device)
+
+        if optimizer == "sgd":
+            self.optimizer = ch.optim.SGD(param_groups, lr=1, momentum=momentum)
+        elif optimizer == "adam":
+            self.optimizer = ch.optim.Adam(param_groups)
+        if prediction_type == "classification":
+            # self.loss = ch.nn.CrossEntropyLoss(weight=weight, label_smoothing=label_smoothing)
+            self.loss = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        elif prediction_type == "regression":
+            # self.loss = ch.nn.MSELoss()
+            self.loss = ch.nn.L1Loss()
 
     @param('data.train_dataset')
     @param('data.num_workers')
@@ -218,8 +252,10 @@ class ImageNetTrainer:
     @param('training.distributed')
     @param('data.in_memory')
     @param('mlp.target_file')
+    @param('data.train_proportion')
+    @param('data.seed')
     def create_train_loader(self, train_dataset, num_workers, batch_size,
-                            distributed, in_memory, target_file):
+                            distributed, in_memory, target_file, train_proportion, seed):
         this_device = f'cuda:{self.gpu}'
         train_path = Path(train_dataset)
         assert train_path.is_file()
@@ -232,7 +268,7 @@ class ImageNetTrainer:
             ToTensor(),
             ToDevice(ch.device(this_device), non_blocking=True),
             ToTorchImage(),
-            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32)
         ]
 
         label_pipeline: List[Operation] = [
@@ -242,17 +278,47 @@ class ImageNetTrainer:
             ToDevice(ch.device(this_device), non_blocking=True)
         ]
 
+        subset_indices = None
+        if train_proportion < 1:
+            dummy_loader = Loader(train_dataset,
+                batch_size=1,
+                num_workers=num_workers,
+                order=OrderOption.RANDOM,
+                drop_last=False,
+                pipelines={
+                    'image': image_pipeline,
+                    'label': label_pipeline
+                },
+                distributed=distributed,
+                indices=subset_indices,
+                seed=seed,
+                os_cache=in_memory
+                )
+    
+            dataset_size = len(dummy_loader)
+            print(f"Original dataset size: {dataset_size}")
+            subset_size = int(dataset_size * train_proportion)
+            np.random.default_rng(seed)
+            np.random.seed(seed)
+            subset_indices = np.random.choice(
+                dataset_size, 
+                subset_size, 
+                replace=False)
+            print(f"Subset size: {subset_size} - indices: {subset_indices[:5]}")
+
         order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
         loader = Loader(train_dataset,
                         batch_size=batch_size,
                         num_workers=num_workers,
                         order=order,
                         os_cache=in_memory,
-                        drop_last=True,
+                        drop_last=False,
                         pipelines={
                             'image': image_pipeline,
                             'label': label_pipeline
                         },
+                        indices=subset_indices,
+                        seed=seed,
                         distributed=distributed)
 
         return loader
@@ -262,8 +328,11 @@ class ImageNetTrainer:
     @param('validation.batch_size')
     @param('validation.resolution')
     @param('training.distributed')
+    @param('data.in_memory')
+    @param('data.val_proportion')
+    @param('data.seed')
     def create_val_loader(self, val_dataset, num_workers, batch_size,
-                          resolution, distributed):
+                          resolution, distributed, in_memory, val_proportion, seed):
         this_device = f'cuda:{self.gpu}'
         val_path = Path(val_dataset)
         assert val_path.is_file()
@@ -274,7 +343,7 @@ class ImageNetTrainer:
             ToTensor(),
             ToDevice(ch.device(this_device), non_blocking=True),
             ToTorchImage(),
-            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32)
         ]
 
         label_pipeline = [
@@ -285,6 +354,34 @@ class ImageNetTrainer:
             non_blocking=True)
         ]
 
+        subset_indices = None
+        if val_proportion < 1:
+            dummy_loader = Loader(val_dataset,
+                batch_size=1,
+                num_workers=num_workers,
+                order=OrderOption.SEQUENTIAL,
+                drop_last=False,
+                pipelines={
+                    'image': image_pipeline,
+                    'label': label_pipeline
+                },
+                distributed=distributed,
+                indices=subset_indices,
+                seed=seed,
+                os_cache=in_memory
+                )
+    
+            dataset_size = len(dummy_loader)
+            print(f"Original dataset size: {dataset_size}")
+            subset_size = int(dataset_size * val_proportion)
+            np.random.default_rng(seed)
+            np.random.seed(seed)
+            subset_indices = np.random.choice(
+                dataset_size, 
+                subset_size, 
+                replace=False)
+            print(f"Subset size: {subset_size} - indices: {subset_indices[:5]}")
+
         loader = Loader(val_dataset,
                         batch_size=batch_size,
                         num_workers=num_workers,
@@ -294,6 +391,8 @@ class ImageNetTrainer:
                             'image': image_pipeline,
                             'label': label_pipeline
                         },
+                        indices=subset_indices,
+                        seed=seed,
                         distributed=distributed)
         return loader
 
@@ -311,11 +410,20 @@ class ImageNetTrainer:
                     'epoch': epoch
                 }
 
-                self.eval_and_log(extra_dict)
+                val_stats = self.eval_and_log(extra_dict)
 
+            ch.save({
+                "model": self.model.state_dict,
+                "score": val_stats,
+                "epoch": epoch,
+            }, self.log_folder / "current_weights.pt")
         self.eval_and_log({'epoch':epoch})
         if self.gpu == 0:
-            ch.save(self.model.state_dict(), self.log_folder / 'final_weights.pt')
+            ch.save({
+                "model": self.model.state_dict,
+                "score": val_stats,
+                "epoch": epoch,
+            }, self.log_folder / "final_weights.pt")
 
     def eval_and_log(self, extra_dict={}):
         start_val = time.time()
@@ -332,30 +440,56 @@ class ImageNetTrainer:
         return stats
 
     @param('model.arch')
-    @param('model.pretrained')
     @param('training.distributed')
     @param('training.use_blurpool')
-    @param('')
-    def create_model_and_scaler(self, arch, pretrained, distributed, use_blurpool):
+    @param('mlp.prediction_type')
+    @param('mlp.trunk_layer')
+    @param("mlp.target_file")
+    def create_model_and_scaler(self, arch, distributed, use_blurpool, prediction_type, trunk_layer,
+        target_file
+    ):
         scaler = GradScaler()
         if "swin" in arch:
             import gated_swin
             feature_extractor_loader = getattr(gated_swin, arch)
             weights = getattr(gated_swin, "Swin_B_Weights")
             feature_extractor = feature_extractor_loader(weights=weights.DEFAULT)
-            feature_extractor.infer_trunk_only()
+            feature_extractor.infer_trunk_only(trunk_layer)
         else:
             raise NotImplementedError()
 
-        mlp_input_dim = 7, 7
+        if trunk_layer == "first":
+            mlp_input_dim = 15, 15
+        else:
+            mlp_input_dim = 5, 5
+
+        trunk_dim = feature_extractor.trunk_dim
         feature_extractor.require_gradients = False
-        model = ch.nn.Sequential(
+        num_classes = ch.load(target_file).unique().max() + 1
+        output_dim = num_classes if prediction_type == "classification" else 2
+        layers = [
             feature_extractor,
             Permute([0, 3, 1, 2]), # N H W C -> N C H W
-            ch.nn.AdaptiveAvgPool(*mlp_input_dim),
+            ch.nn.AdaptiveAvgPool2d(mlp_input_dim),
             ch.nn.Flatten(),
-            MLP(mlp_input_dim[0]*mlp_input_dim[1], [1024, 24], activation_layer=ch.nn.GELU, inplace=True)
-        )
+            MLP(
+                mlp_input_dim[0]*mlp_input_dim[1]*trunk_dim, 
+                [1024, 1024, 1024, output_dim], 
+                activation_layer=ch.nn.GELU, 
+                inplace=None, 
+                norm_layer=ch.nn.LayerNorm, 
+                bias=False
+            )
+            # MLP(mlp_input_dim[0]*mlp_input_dim[1]*trunk_dim, [1024, 1024, 1024, output_dim], activation_layer=ch.nn.ReLU, inplace=True, bias=True),
+        ]
+        if prediction_type == "regression":
+            sp = F.softplus
+            layers.append(LambdaLayer(
+                lambda x: sp(x[:, 0]) / (sp(x[:, 0]) + sp(x[:, 1]))
+            ))
+
+        model = ch.nn.Sequential(*layers)
+
 
         def apply_blurpool(mod: ch.nn.Module):
             for (name, child) in mod.named_children():
@@ -373,12 +507,13 @@ class ImageNetTrainer:
         return model, scaler
 
 
-    def retrieve_k(self, target):
-        return self.max_block_drop_per_class[target]
+    def get_target_k(self, target):
+        return self.max_block_drop_per_class[target].to(device=target.device)
         
 
     @param('logging.log_level')
-    def train_loop(self, epoch, log_level):
+    @param("mlp.prediction_type")
+    def train_loop(self, epoch, log_level, prediction_type):
         model = self.model
         model.train()
         losses = []
@@ -394,15 +529,20 @@ class ImageNetTrainer:
                 param_group['lr'] = lrs[ix]
 
 
-            target_k = self.retrieve_k(target)
+            target_k = self.get_target_k(target)
             self.optimizer.zero_grad(set_to_none=True)
-            with autocast():
-                output = self.model(images)
-                loss_train = self.loss(output, target_k)
+            # with autocast():
+            output = self.model(images)
+            if prediction_type == "regression":
+                target_k = target_k.float() / 24
 
-            self.scaler.scale(loss_train).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            loss_train = self.loss(output, target_k)
+
+            # self.scaler.scale(loss_train).backward()
+            loss_train.backward()
+            # self.scaler.step(self.optimizer)
+            # self.scaler.update()
+            self.optimizer.step()
             ### Training end
 
             ### Logging start
@@ -422,24 +562,44 @@ class ImageNetTrainer:
                 msg = ', '.join(f'{n}={v}' for n, v in zip(names, values))
                 iterator.set_description(msg)
             ### Logging end
+        return loss_train.item()
+
+    def scalar_to_onehot(self, scalar_prediction):
+        scalar_prediction = ch.clamp(scalar_prediction*24, 0, 24).long()
+        onehot = ch.nn.functional.one_hot(scalar_prediction, num_classes=25).float()
+        return onehot
 
     @param('validation.lr_tta')
-    def val_loop(self, lr_tta):
+    @param("mlp.prediction_type")
+    def val_loop(self, lr_tta, prediction_type):
         model = self.model
         model.eval()
 
+        
         with ch.no_grad():
             with autocast():
+                conf_mat = ch.zeros(25, 25, dtype=int)
                 for images, target in tqdm(self.val_loader):
+                    target_k = self.get_target_k(target)
                     output = self.model(images)
-                    if lr_tta:
-                        output += self.model(ch.flip(images, dims=[3]))
+                    loss_val = self.loss(output, target_k)
+
+                    if prediction_type == "regression":
+                        output = self.scalar_to_onehot(output)
+
+                    for p, t in zip(output.argmax(dim=1), target_k):
+                        conf_mat[p, t] += 1
+
 
                     for k in ['top_1', 'top_5']:
-                        self.val_meters[k](output, target)
+                        self.val_meters[k](output, target_k)
 
-                    loss_val = self.loss(output, target)
                     self.val_meters['loss'](loss_val)
+            
+        print(conf_mat.numpy()[:24, :24])
+        print("targ", conf_mat.sum(0).numpy())
+        print("pred", conf_mat.sum(1).numpy())
+
 
         stats = {k: m.compute().item() for k, m in self.val_meters.items()}
         [meter.reset() for meter in self.val_meters.values()]
@@ -451,6 +611,11 @@ class ImageNetTrainer:
             'top_1': torchmetrics.Accuracy(compute_on_step=False).to(self.gpu),
             'top_5': torchmetrics.Accuracy(compute_on_step=False, top_k=5).to(self.gpu),
             'loss': MeanScalarMetric(compute_on_step=False).to(self.gpu)
+        }
+
+        self.mlp_outputs = {
+            "preds": torchmetrics.CatMetric().to(self.gpu),
+            "targets": torchmetrics.CatMetric().to(self.gpu),
         }
 
         if self.gpu == 0:
