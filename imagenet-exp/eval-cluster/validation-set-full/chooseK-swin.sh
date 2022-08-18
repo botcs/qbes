@@ -28,6 +28,6 @@ echo "ID_TO=$ID_TO"
 python test_imagenet.py --config swin_configs/swin_qbes_eval_val.yaml \
     --model.weights "" --model.arch "swin_b" \
     --qbes.config_file qbes_configs/24nCr$CHOOSE-10k.json \
-    --logging.folder=$WORK/qbes/imagenet-test-logs/swin/cache/val-/full-10kCAP/ \
+    --logging.folder=$WORK/qbes/imagenet-test-logs/swin/cache/val-ordered/ \
     --qbes.id_from $ID_FROM --qbes.id_to $ID_TO \
     --training.distributed 0 --dist.world_size 1

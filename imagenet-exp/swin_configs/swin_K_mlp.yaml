@@ -1,0 +1,45 @@
+data:
+  in_memory: 0
+  num_workers: 12
+  train_dataset: "/export/work/cbotos/imagenet/train_500_0.50_90.ffcv"
+  # train_dataset: "/export/work/cbotos/imagenet/val_500_0.50_90.ffcv"
+  val_dataset: "/export/work/cbotos/imagenet/val_500_0.50_90.ffcv"
+  train_proportion: 1.
+  val_proportion: 1.
+dist:
+  world_size: 1
+logging:
+  folder: /tmp/
+lr:
+  lr: 1e-4
+  lr_schedule_type: step
+model:
+  arch: swin_b
+resolution:
+  end_ramp: 76
+  max_res: 256
+  min_res: 224
+  start_ramp: 65
+training:
+  eval_only: 0
+  batch_size: 512
+  bn_wd: 0
+  distributed: 0
+  epochs: 88
+  label_smoothing: 0.0
+  momentum: 0.9
+  optimizer: adam
+  weight_decay: 0.0001
+  use_blurpool: 1
+validation:
+  lr_tta: false
+  resolution: 256
+  batch_size: 512
+mlp:
+  # target_file: "/home/cbotos/github/qbes/imagenet-exp/notebook-cache/swin/max_block_drop_per_class_at_delta0.01.pth"
+  target_file: "notebook-cache/swin/max_block_drop_per_class_at_delta0.01.pth"
+  # prediction_type: "regression"
+  trunk_layer: "last"
+  # trunk_layer: "first"
+  prediction_type: "classification"
+  balance_weight: 0
